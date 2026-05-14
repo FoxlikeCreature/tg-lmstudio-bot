@@ -78,7 +78,7 @@ BOT_USERNAME: str | None = None
 
 chat_histories: dict[int, list[dict[str, str]]] = {}
 message_counters: dict[int, int] = {}
-online_mode_until: float | None = None
+online_mode_until: dict[int, float] = {}  # chat_id -> timestamp
 chat_message_log: dict[int, list[bool]] = {}
 
 # followup: пользователь, чей запрос бот только что обработал
@@ -419,15 +419,12 @@ def online_chance(chat_id: int) -> float:
     return 0.05
 
 
-def calculate_group_delay(trigger_type: TriggerType) -> float:
+def calculate_group_delay(trigger_type: TriggerType, chat_id: int) -> float:
     if trigger_type in ("tag", "question", "followup"):
         return 0.0
-    # random_online не задерживаем: шанс уже отфильтрован online_chance,
-    # длинная задержка приводила к ответам в уже мёртвый чат
     if trigger_type == "random_online":
         return 0.0
-    # Если бот "онлайн" — отвечаем сразу
-    if online_mode_until and time.time() < online_mode_until:
+    if online_mode_until.get(chat_id, 0) > time.time():
         return 0.0
     if random.random() < IMMEDIATE_CHANCE:
         return 0.0
@@ -452,8 +449,7 @@ async def send_idle_message(chat_id: int) -> None:
         # и засоряют контекст модели, ухудшая качество следующих ответов.
 
         # Продлить онлайн-режим
-        global online_mode_until
-        online_mode_until = time.time() + ONLINE_WINDOW
+        online_mode_until[chat_id] = time.time() + ONLINE_WINDOW
 
         # Записать в лог сообщений
         if chat_id not in chat_message_log:
@@ -518,21 +514,17 @@ async def process_message(
     pending_tasks[chat_id].append(task)
 
     try:
-        global online_mode_until
-
         # Для групп вычисляем задержку
         delay = 0.0
         if is_group:
-            delay = calculate_group_delay(trigger_type)
+            delay = calculate_group_delay(trigger_type, chat_id)
 
         if delay > 0:
             logger.info(f"Задержка {delay:.1f}с для чата {chat_id} (триггер: {trigger_type})")
             await asyncio.sleep(delay)
 
         # Если к моменту выполнения онлайн-режим истёк — отменяем random_online
-        if trigger_type == "random_online" and (
-            not online_mode_until or time.time() >= online_mode_until
-        ):
+        if trigger_type == "random_online" and online_mode_until.get(chat_id, 0) <= time.time():
             logger.info(f"random_online отменён — онлайн-режим истёк для чата {chat_id}")
             return
 
@@ -642,8 +634,8 @@ async def process_message(
 
         # Продлить окно "онлайн" — бот активен ещё 20 минут (не для random_online)
         if trigger_type != "random_online":
-            online_mode_until = time.time() + ONLINE_WINDOW
-            logger.info(f"Окно онлайн продлено до {online_mode_until:.0f}")
+            online_mode_until[chat_id] = time.time() + ONLINE_WINDOW
+            logger.info(f"Окно онлайн продлено до {online_mode_until[chat_id]:.0f}")
 
         # Сбросить idle-таймер — бот только что отправил сообщение
         if is_group:
@@ -714,8 +706,7 @@ async def handle_message(message: types.Message):
         if (
             message.chat.type in ("group", "supergroup")
             and message.text
-            and online_mode_until
-            and time.time() < online_mode_until
+            and online_mode_until.get(chat_id, 0) > time.time()
             and random.random() < online_chance(chat_id)
         ):
             logger.info(f"Случайный онлайн-триггер в чате {chat_id}")
