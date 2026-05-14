@@ -28,6 +28,7 @@ LM_STUDIO_URL = os.getenv("LM_STUDIO_URL")
 MODEL = os.getenv("MODEL", "auto")
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
 MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
+GROUP_CONTEXT_SIZE = int(os.getenv("GROUP_CONTEXT_SIZE", "20"))
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "Ты — полезный ассистент.")
 SYSTEM_PROMPT_RAG = os.getenv(
     "SYSTEM_PROMPT_RAG",
@@ -93,6 +94,27 @@ pending_tasks: dict[int, list[asyncio.Task]] = {}
 
 # Idle-таймер: автоматические сообщения если бот давно не отвечал
 idle_timers: dict[int, asyncio.Task] = {}
+
+# Скользящий буфер сообщений группы для контекста
+group_message_buffer: dict[int, list[dict]] = {}
+
+
+def _get_sender_name(message: types.Message) -> str:
+    u = message.from_user
+    return u.first_name or u.username or str(u.id)
+
+
+def _append_group_ctx(chat_id: int, name: str, text: str) -> None:
+    buf = group_message_buffer.setdefault(chat_id, [])
+    buf.append({"name": name, "text": text})
+    if len(buf) > GROUP_CONTEXT_SIZE:
+        del buf[:-GROUP_CONTEXT_SIZE]
+
+
+def _format_group_ctx(chat_id: int, exclude_text: str) -> str:
+    buf = group_message_buffer.get(chat_id, [])
+    lines = [f"[{m['name']}]: {m['text']}" for m in buf if m["text"] != exclude_text]
+    return "\n".join(lines) if lines else ""
 
 
 def cancel_pending_tasks(chat_id: int) -> None:
@@ -236,6 +258,14 @@ def query_lm_studio(chat_id: int, user_message: str) -> str:
     fact_hint = personal_fact_hint(user_message)
     if fact_hint:
         system_content += f"\n\n[факт о себе: {fact_hint}]"
+
+    group_ctx = _format_group_ctx(chat_id, user_message)
+    if group_ctx:
+        system_content += (
+            "\n\n--- Последние сообщения в чате ---\n"
+            + group_ctx
+            + "\n---"
+        )
 
     messages = [{"role": "system", "content": system_content}]
     messages.extend(history[-MAX_HISTORY:])
@@ -561,6 +591,7 @@ async def process_message(
         # Сбросить idle-таймер — бот только что отправил сообщение
         if is_group:
             schedule_idle_message(chat_id)
+            _append_group_ctx(chat_id, "лиса", reply)
 
         # Записать ответ бота в лог
         if chat_id not in chat_message_log:
@@ -610,6 +641,10 @@ async def handle_message(message: types.Message):
         f"Сообщение #{get_message_counter(chat_id)} от {message.from_user.id} "
         f"в чате {chat_id} ({message.chat.type})"
     )
+
+    # Записать в групповой буфер контекста
+    if message.chat.type in ("group", "supergroup") and message.text:
+        _append_group_ctx(chat_id, _get_sender_name(message), message.text)
 
     # Инициализировать idle-таймер при первом сообщении в чате (если ещё нет активного таймера)
     if message.chat.type in ("group", "supergroup") and chat_id not in idle_timers:
