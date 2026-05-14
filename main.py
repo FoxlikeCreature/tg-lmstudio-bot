@@ -65,6 +65,7 @@ ONLINE_WINDOW = 600    # 10 минут — окно "онлайн" после о
 
 IDLE_BASE = 14400       # 4 часа — базовое время без активности
 IDLE_RANDOM_MAX = 600   # 10 минут — случайная добавка
+SPLIT_CHANCE = 0.30     # вероятность второго короткого сообщения
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -298,6 +299,33 @@ def query_lm_studio(chat_id: int, user_message: str) -> str:
         return ""
 
 
+def _query_split_reply(chat_id: int, first_reply: str) -> str:
+    """Короткое продолжение первого ответа — как будто вспомнила что-то."""
+    history = get_chat_history(chat_id)
+    continuation_prompt = (
+        "Ты только что написала это сообщение. Напиши одно короткое дополнение — "
+        "буквально 3-8 слов, как будто вспомнила деталь или хочется добавить реакцию. "
+        "Не повторяй сказанное, не объясняй."
+    )
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(history[-MAX_HISTORY:])
+    messages.append({"role": "user", "content": continuation_prompt})
+    try:
+        resp = requests.post(
+            f"{LM_STUDIO_URL}/v1/chat/completions",
+            json={"model": MODEL, "messages": messages, "temperature": TEMPERATURE},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        second = resp.json()["choices"][0]["message"]["content"]
+        if history and history[-1]["role"] == "assistant":
+            history[-1]["content"] = first_reply + "\n" + second
+        return second
+    except Exception as e:
+        logger.warning(f"Ошибка split-reply для чата {chat_id}: {e}")
+        return ""
+
+
 TriggerType = Literal["tag", "question", "reply", "word", "followup", "random_online"]
 
 
@@ -391,9 +419,10 @@ def online_chance(chat_id: int) -> float:
 def calculate_group_delay(trigger_type: TriggerType) -> float:
     if trigger_type in ("tag", "question", "followup"):
         return 0.0
-    # random_online: задержка как у обычного триггера (онлайн уже активен)
+    # random_online не задерживаем: шанс уже отфильтрован online_chance,
+    # длинная задержка приводила к ответам в уже мёртвый чат
     if trigger_type == "random_online":
-        return random.uniform(MIN_DELAY, MAX_DELAY)
+        return 0.0
     # Если бот "онлайн" — отвечаем сразу
     if online_mode_until and time.time() < online_mode_until:
         return 0.0
@@ -486,6 +515,8 @@ async def process_message(
     pending_tasks[chat_id].append(task)
 
     try:
+        global online_mode_until
+
         # Для групп вычисляем задержку
         delay = 0.0
         if is_group:
@@ -494,6 +525,13 @@ async def process_message(
         if delay > 0:
             logger.info(f"Задержка {delay:.1f}с для чата {chat_id} (триггер: {trigger_type})")
             await asyncio.sleep(delay)
+
+        # Если к моменту выполнения онлайн-режим истёк — отменяем random_online
+        if trigger_type == "random_online" and (
+            not online_mode_until or time.time() >= online_mode_until
+        ):
+            logger.info(f"random_online отменён — онлайн-режим истёк для чата {chat_id}")
+            return
 
         # Лесенка — только для followup в группах
         if is_group and trigger_type == "followup":
@@ -582,9 +620,25 @@ async def process_message(
                 await bot.send_message(chat_id, chunk)
                 logger.info(f"Отправлено как plain в чат {chat_id}")
 
+        # Split-сообщение с шансом 30%
+        if random.random() < SPLIT_CHANCE:
+            second = await asyncio.to_thread(_query_split_reply, chat_id, reply)
+            if second:
+                await asyncio.sleep(random.uniform(1.0, 3.0))
+                typing2 = asyncio.create_task(keep_typing(chat_id, 30))
+                await asyncio.sleep(estimate_typing_time(second))
+                typing2.cancel()
+                try:
+                    await typing2
+                except asyncio.CancelledError:
+                    pass
+                await bot.send_message(chat_id, second)
+                if is_group:
+                    _append_group_ctx(chat_id, "лиса", second)
+                logger.info(f"Split-reply в чат {chat_id}: {second[:60]}")
+
         # Продлить окно "онлайн" — бот активен ещё 20 минут (не для random_online)
         if trigger_type != "random_online":
-            global online_mode_until
             online_mode_until = time.time() + ONLINE_WINDOW
             logger.info(f"Окно онлайн продлено до {online_mode_until:.0f}")
 
