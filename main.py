@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 import json
@@ -39,6 +40,9 @@ SYSTEM_PROMPT_RAG = os.getenv(
     "Не говори что ты ИИ. Старайся повторять формулировки и темы из приведённых примеров — они важнее всего."
 )
 TRIGGER_WORD = "лиса"
+# лис[ауыеойиёцяь] — все падежи/числа лисы; \bлис\b — род. мн. «лис»
+# \bрыб — любые формы рыбы (рыбак, рыбалка и т.д. тоже OK)
+_TRIGGER_RE = re.compile(r"\bлис[ауыеойиёцяь]|\bлис\b|\bрыб", re.IGNORECASE)
 TRIGGER_TAG = "@Neurocutefox_bot"
 USER_FACTS = os.getenv("USER_FACTS", "")
 
@@ -386,10 +390,9 @@ def should_reply(message: types.Message, chat_id: int) -> tuple[str, TriggerType
     if BOT_ID and reply and reply.from_user and reply.from_user.id == BOT_ID:
         return (message.text, "reply")
 
-    # Триггер 4: слово "лиса"
-    if message.text.lower().startswith(TRIGGER_WORD):
-        cleaned = message.text[len(TRIGGER_WORD):]
-        return (cleaned.strip() if cleaned.strip() else None, "word")
+    # Триггер 4: лиса/рыба в любой форме, в любом месте сообщения
+    if _TRIGGER_RE.search(message.text):
+        return (message.text, "word")
 
     # Триггер 5: сообщение от того же пользователя после ответа бота
     if is_followup(message, chat_id):
