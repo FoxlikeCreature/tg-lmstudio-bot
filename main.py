@@ -699,6 +699,16 @@ async def process_message(
                 del pending_tasks[chat_id]
 
 
+@dp.my_chat_member()
+async def handle_my_chat_member(update: types.ChatMemberUpdated):
+    old_status = update.old_chat_member.status
+    new_status = update.new_chat_member.status
+    if old_status in ("left", "kicked") and new_status in ("member", "administrator"):
+        chat_id = update.chat.id
+        online_mode_until[chat_id] = time.time() + ONLINE_WINDOW
+        logger.info(f"[{chat_id}] Бот добавлен в чат — онлайн-режим активирован")
+
+
 @dp.message()
 async def handle_message(message: types.Message):
     # Игнорировать анонимные посты и собственные сообщения бота
