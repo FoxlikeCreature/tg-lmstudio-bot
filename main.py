@@ -116,10 +116,10 @@ def _append_group_ctx(chat_id: int, name: str, text: str) -> None:
         del buf[:-GROUP_CONTEXT_SIZE]
 
 
-def _format_group_ctx(chat_id: int, exclude_text: str) -> str:
+def _format_group_ctx(chat_id: int, exclude_text: str, limit: int = 8) -> str:
     buf = group_message_buffer.get(chat_id, [])
     lines = [f"[{m['name']}]: {m['text']}" for m in buf if m["text"] != exclude_text]
-    return "\n".join(lines) if lines else ""
+    return "\n".join(lines[-limit:]) if lines else ""
 
 
 def cancel_pending_tasks(chat_id: int) -> None:
@@ -263,14 +263,14 @@ def query_lm_studio(chat_id: int, user_message: str) -> str:
     if fact_hint:
         system_content += f"\n\n[факт о себе: {fact_hint}]"
 
-    group_ctx = _format_group_ctx(chat_id, user_message)
+    group_ctx = _format_group_ctx(chat_id, user_message, limit=8)
     if group_ctx:
         system_content += (
-            "\n\n--- Последние сообщения в чате ---\n"
+            "\n\n--- Фон (последние сообщения в чате, не отвечай на них напрямую) ---\n"
             + group_ctx
             + "\n---"
         )
-
+    system_content += "\n\nОтвечай только на последнее сообщение собеседника. Контекст чата — только фон."
     messages = [{"role": "system", "content": system_content}]
     messages.extend(history[-MAX_HISTORY:])
     messages.append({"role": "user", "content": user_message})
