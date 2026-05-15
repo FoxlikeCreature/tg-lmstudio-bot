@@ -67,7 +67,7 @@ MIN_DELAY = 180         # 3 минуты
 MAX_DELAY = 600         # 10 минут
 ONLINE_WINDOW = 600    # 10 минут — окно "онлайн" после ответа
 
-IDLE_BASE = 14400       # 4 часа — базовое время без активности
+IDLE_BASE = 10800       # 3 часа — базовое время без активности
 IDLE_RANDOM_MAX = 600   # 10 минут — случайная добавка
 SPLIT_CHANCE = 0.30     # вероятность второго короткого сообщения
 
@@ -330,6 +330,37 @@ def _query_split_reply(chat_id: int, first_reply: str) -> str:
         return ""
 
 
+def _query_idle_message(chat_id: int) -> str:
+    """Генерирует спонтанное сообщение через LLM с учётом последних сообщений чата."""
+    buf = group_message_buffer.get(chat_id, [])
+    ctx_lines = [f"[{m['name']}]: {m['text']}" for m in buf[-5:]]
+    ctx = "\n".join(ctx_lines)
+    idle_prompt = (
+        "Посмотри на последние сообщения в чате. "
+        "Напиши одну короткую мысль — своё мнение, реакцию или наблюдение. "
+        "Не обращайся ни к кому напрямую, не отвечай на конкретный вопрос. "
+        "Пиши как будто вспомнила что-то или захотела поделиться. "
+        "5–15 слов, без точки в конце."
+    )
+    if ctx:
+        idle_prompt = f"Последние сообщения в чате:\n{ctx}\n\n{idle_prompt}"
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": idle_prompt},
+    ]
+    try:
+        resp = requests.post(
+            f"{LM_STUDIO_URL}/v1/chat/completions",
+            json={"model": MODEL, "messages": messages, "temperature": TEMPERATURE},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.warning(f"Ошибка генерации idle-сообщения: {e}")
+        return get_random_phrase()
+
+
 TriggerType = Literal["tag", "question", "reply", "word", "followup", "random_online"]
 
 
@@ -440,8 +471,8 @@ async def send_idle_message(chat_id: int) -> None:
         schedule_idle_message(chat_id)
         return
 
-    phrase = get_random_phrase()
-    logger.info(f"Idle-сообщение в чат {chat_id}: {phrase}")
+    phrase = await asyncio.to_thread(_query_idle_message, chat_id)
+    logger.info(f"Idle-сообщение в чат {chat_id}: {phrase[:60]}")
 
     try:
         await bot.send_message(chat_id, phrase)
@@ -716,6 +747,13 @@ async def handle_message(message: types.Message):
         return
 
     user_text, trigger_type = result
+
+    # При реплае на сообщение бота — включить цитируемый текст в контекст
+    if trigger_type == "reply" and message.reply_to_message and message.reply_to_message.text:
+        quoted = message.reply_to_message.text
+        if message.reply_to_message.from_user and message.reply_to_message.from_user.id == BOT_ID:
+            user_text = f"[Ты ранее написала: {quoted}]\n\n{user_text}"
+
     logger.info(f"Триггер {trigger_type}: {user_text[:60]}")
 
     # Новый триггер — сбросить активную лесенку и followup
