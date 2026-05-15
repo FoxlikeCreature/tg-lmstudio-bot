@@ -524,11 +524,16 @@ def cancel_idle_timer(chat_id: int) -> None:
         logger.info(f"Idle-таймер отменён для чата {chat_id}")
 
 
-async def keep_typing(chat_id: int, duration: float, interval: float = 4.0):
+async def keep_typing(chat_id: int, duration: float, interval: float = 8.0):
     """Периодически отправляет typing action чтобы статус не пропал."""
     elapsed = 0.0
     while elapsed < duration:
-        await bot.send_chat_action(chat_id, "typing")
+        try:
+            await bot.send_chat_action(chat_id, "typing")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
         sleep_time = min(interval, duration - elapsed)
         await asyncio.sleep(sleep_time)
         elapsed += sleep_time
@@ -604,29 +609,24 @@ async def process_message(
         model_task = asyncio.create_task(
             asyncio.to_thread(query_lm_studio, chat_id, final_text)
         )
-        typing_task = asyncio.create_task(keep_typing(chat_id, 300))
-        reply = await model_task
-        if not reply:
-            logger.info(f"Пустой ответ для чата {chat_id} — пропускаю отправку")
+        typing_task = asyncio.create_task(keep_typing(chat_id, 45))
+        try:
+            reply = await model_task
+        finally:
             typing_task.cancel()
             try:
                 await typing_task
             except asyncio.CancelledError:
                 pass
+        if not reply:
+            logger.info(f"Пустой ответ для чата {chat_id} — пропускаю отправку")
             return
         logger.info(f"Ответ модели для чата {chat_id}: {reply[:80]}...")
 
-        # Задержка по символам — typing продолжается
+        # Задержка по символам
         typing_time = estimate_typing_time(reply)
         logger.info(f"Типинг задержка {typing_time}с для чата {chat_id}")
         await asyncio.sleep(typing_time)
-
-        # Остановить фоновый typing
-        typing_task.cancel()
-        try:
-            await typing_task
-        except asyncio.CancelledError:
-            pass
 
         # Ещё раз показать "печатает" перед отправкой
         await bot.send_chat_action(chat_id, "typing")
@@ -651,7 +651,11 @@ async def process_message(
                 await bot.send_message(chat_id, chunk)
                 logger.info(f"Отправлено как plain в чат {chat_id}")
 
-        # Split-сообщение с шансом 30%
+        # Продлить окно "онлайн" до split-сообщения (защита от race condition при отмене)
+        if trigger_type != "random_online":
+            online_mode_until[chat_id] = time.time() + ONLINE_WINDOW
+
+        # Split-сообщение с шансом 20%
         if random.random() < SPLIT_CHANCE:
             second = await asyncio.to_thread(_query_split_reply, chat_id, reply)
             if second:
@@ -667,11 +671,6 @@ async def process_message(
                 if is_group:
                     _append_group_ctx(chat_id, "лиса", second)
                 logger.info(f"Split-reply в чат {chat_id}: {second[:60]}")
-
-        # Продлить окно "онлайн" — бот активен ещё 20 минут (не для random_online)
-        if trigger_type != "random_online":
-            online_mode_until[chat_id] = time.time() + ONLINE_WINDOW
-            logger.info(f"Окно онлайн продлено до {online_mode_until[chat_id]:.0f}")
 
         # Сбросить idle-таймер — бот только что отправил сообщение
         if is_group:
