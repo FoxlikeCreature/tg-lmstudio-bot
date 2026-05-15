@@ -134,8 +134,8 @@ def cancel_pending_tasks(chat_id: int) -> None:
 rag_index: dict | None = None
 _rag_matrix = None      # csr_matrix — кешируется один раз при загрузке
 _rag_vectorizer = None  # TfidfVectorizer — кешируется один раз при загрузке
-RAG_TOP_K = 8
-RAG_MIN_SCORE = 0.20        # Порог: выше → меньше шума, но точнее
+RAG_TOP_K = 16
+RAG_MIN_SCORE = 0.15        # Порог: выше → меньше шума, но точнее
 RAG_CONTEXT_MAX_LEN = 5000  # Больше примеров = сильнее влияние на стиль
 
 
@@ -191,7 +191,7 @@ def enrich_with_rag(query: str) -> str:
 
         if version >= 2:
             pair = rag_index["pairs"][idx]
-            text = pair["response"]
+            text = f"[{pair['query']}] → {pair['response']}"
         else:
             chunk = rag_index["chunks"][idx]
             text = chunk["text"]
@@ -255,8 +255,9 @@ def query_lm_studio(chat_id: int, user_message: str) -> str:
     system_content = active_prompt
     if rag_context:
         system_content += (
-            "\n\n---\nВот как ты отвечала в похожих ситуациях "
-            "(это твои реальные слова — держись этого стиля и лексики):\n\n"
+            "\n\n---\nВот как ты отвечала в похожих ситуациях — "
+            "это твои реальные слова, они важнее общих правил выше. "
+            "Копируй лексику, длину, тон:\n\n"
             + rag_context
             + "\n---"
         )
